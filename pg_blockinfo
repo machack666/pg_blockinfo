@@ -1,0 +1,268 @@
+#!/usr/bin/perl
+
+use strict;
+use warnings;
+
+require 5.008;
+
+use Getopt::Long;
+use Data::Dumper;
+
+our $VERSION = q('0.1');
+
+my $bs     = 8192;
+my $debug  = 0;
+my $fields = [];
+my $help   = 0;
+my $ranges = [];
+my $hex    = 0;
+my $count  = 0;
+
+GetOptions(
+    'd|debug'       => \$debug,
+    'f|fields=s'    => $fields,
+    'h|help'        => \$help,
+    's|blocksize=i' => \$bs,
+    'r|b|range=s'   => $ranges,
+    'x|hex'         => \$hex,
+    'c|blockcount'  => \$count,
+) or usage(1);
+
+help() and exit if $help;
+usage(1, "$0: one relfile required") unless @ARGV == 1;
+
+my ($unpack_template, $output_format) = parse_fields($fields);
+my @ranges = parse_ranges($ranges);
+
+debug("got unpack_template: '$unpack_template'\n");
+debug("got output_format: '$output_format'\n");
+debug("found ranges: ". Data::Dumper::Dumper(\@ranges));
+
+RELFILE:
+for my $f (@ARGV) {
+    -r $f or warn "can't read $f; skipping\n" and next RELFILE;
+
+    my $sz = (stat($f))[7];
+
+    debug("relfile $f of size $sz\n");
+    warn "$f not a multiple of block size ($bs); skipping\n" and next RELFILE if $sz % $bs;
+    debug("opening $f\n");
+
+    open (my $fh, '<:raw:mmap', $f ) or warn "Couldn't mmap $f; skipping\n" and next RELFILE;
+
+    my $blocks = $sz / $bs;
+    my $data;
+
+    foreach my $r (@ranges) {
+        my ($s,$e) = @$r;
+        $s = 0           unless defined $s;
+        $e = $blocks - 1 unless defined $e;
+
+        # clamp excess-size block in case seeking to far
+        # allocates/instantiates data on-disk even in mmap'd read-only
+        # mode, that'd be bad.
+
+        $e = $blocks - 1 if $e >= $blocks;
+
+        # I'm gonna be lazy and assume the ranges are sane as returned
+        # from parse_ranges, i.e., no overlaps, $s always <= $e, etc
+
+        for my $i ($s..$e) {
+            sysseek($fh, $i * $bs, 0);
+            sysread($fh, $data, $bs) or warn "unexpected eof() on block $i\n" and next RELFILE;
+
+            printf $output_format, $i, unpack $unpack_template, $data;
+        }
+    }
+
+    debug("closing $f\n");
+    close $fh;
+}
+
+
+
+######  Utility funcs, etc  ######
+use vars qw(@valid_fields %field_abbrev %field_size %size_fmt %size_skip);
+
+# TODO: stick these options in version-specific packages so we can
+# import/alias the symbols in main to specific catversions to allow
+# differing logic/structures as needed.
+
+BEGIN {
+    # shared lookup tables which don't need to pollute the rest of the script
+    @valid_fields = qw(lsn_seg lsn_off tli flags lower upper special pagesize_version prune_xid);
+    %field_abbrev = qw(s lsn_seg o lsn_off t tli f flags l lower u upper S special z pagesize_version v pagesize_version x prune_xid);
+    %field_size   = qw(lsn_seg L lsn_off L tli S flags S lower S upper S special S pagesize_version S prune_xid L);
+    %size_fmt   = ('L' => '0x%08x', 'S' => '0x%04x');
+    %size_skip  = ('L' => 'x4', 'S' => 'x2');
+}
+
+# rules:
+#
+# 1) if no fields are specified, assume we want to output them all
+# 2) otherwise process all -f split by ',' in order:
+#   a) a field name will be expanded from any alias to a full name, with the keyword 'all' meaning all fields.
+#   b) any field prefixed with a '-' will remove that field from the output.
+#   c) as a special case, if the first field is prefixed with '-', assume all fields *except* that field.
+# 3) after all field descs are processed, we will be left with one final set of fields.
+sub parse_fields {
+    my %want_field;
+
+    # implicit "all" when nothing provided
+    my $ref = shift || [];
+    push @$ref, 'all' unless @$ref;
+
+    my @raw_fields = map { split /,/, $_ } @$ref;
+    my @fields;
+
+    debug("@raw_fields\n");
+
+    my $first = 1;
+    for (@raw_fields) {
+        # if we're negating this, remove it from the list of wanted
+        # fields, otherwise add; 'all' is a keyword for all known
+        # fields
+
+        my $neg = s/^-//;
+
+         my @expanded_fields = $field_abbrev{$_} || $_;
+         @expanded_fields = @valid_fields if $_ eq 'all';
+
+        if ($neg) {
+            # a negative field as the first field to be processed is an implicit "everything but this field"
+            @want_field{@valid_fields} = @field_size{@valid_fields} if $first;
+
+            delete @want_field{@expanded_fields};
+        }
+        else {
+            @want_field{@expanded_fields} = @field_size{@expanded_fields};
+        }
+        $first = 0;
+    }
+
+    @fields = keys %want_field;
+    debug("got fields: '@fields'");
+
+    my @unknown_fields = grep { !defined $want_field{$_} } @fields;
+
+    if (@unknown_fields) {
+        die "unknown fields: @unknown_fields; valid ones are: all @valid_fields\n";
+    }
+
+    # always start with the leading block number.
+    # relfile segment limited to 1G, so max block index is 134217727, so 9-char max
+    my $printf =  $hex ? '0x%08x:' : '% 9d:';
+    my $unpack = '';
+
+    foreach my $f (@valid_fields) {
+        if (my $sz = $want_field{$f}) {
+            $unpack .= $sz;
+            $printf .= " $f=" . $size_fmt{$sz};
+        }
+        else {
+            $unpack .= $size_skip{$field_size{$f}};
+        }
+    }
+
+    $printf .= "\n";
+
+    return ($unpack, $printf);
+}
+
+sub parse_ranges {
+    my $digits = qr/(\d+)|(0x[0-9a-f]+)/i;
+    my @r;
+
+    # we don't care about validating any range overlaps, etc here.  we
+    # probably will at some point in the future.
+
+    for my $r ( @{+shift} ) {
+        for (split /,/, $r) {
+            $_ eq '' and debug("skipping empty subrange\n"), next;
+
+            /^(?:               # overall non-capture group
+                 (?:            # the starting block
+                     $digits    # captures int in $1 or hex in $2
+                 )?             # start is optional
+                 (-)?           # do we have a hyphen? needed for the empty end range vs single number case
+                 (?:            # the ending block
+                     $digits    # captures int in $4 or hex in $5
+                 )?             # end is also optional
+             )$/x or die "couldn't parse sub-range: $_\n";
+
+            # set initial variables from the int match possibilities
+            my ($s,$h,$e) = ($1,$3,$4);
+
+            # both the int capture and the hex capture cannot have
+            # succeeded, so if we have a value in the appropriate
+            # positional capture variable we know that we sepecific
+            # the hex form
+
+            $s = hex $2 if defined $2;
+            $e = hex $5 if defined $5;
+
+            # single number parses as a range of blocks; 123- will leave the ending range in-place (i.e., empty)
+            $e = $s unless $h;
+
+            push @r, [$s, $e];
+        }
+    }
+
+    # if no range was provided, we default to the entire file
+    @r or @r = [undef,undef];
+
+    return @r;
+}
+
+sub help {
+    usage(0);
+
+    my $abbrevs = join q{}, map { "    $_ => $field_abbrev{$_}\n"} sort keys %field_abbrev;
+
+    print STDERR <<EOH;
+Options:
+
+    -d, --debug                         output debugging information
+    -h, --help                          display this help
+    -s, --blocksize <int>               specify the blocksize to use (default: 8K)
+    -r, --range <range>[,<range>]+      specify a range of blocks to examine (defaults to all)
+    -b                                  synonym for --range; works exactly the same way
+    -f, --fields <field>[,<field>]+     select which header fields to output (defaults to all)
+    -x, --hex                           display block offsets in hex instead of decimal
+
+Fields can be selected by name or by abbreviation.
+
+Valid names are:
+    @valid_fields
+
+Defined abbreviations are:
+$abbrevs
+You may specify -f multiple times, provide multiple args to -f via ',', or a combination of the two.
+
+You can also specify that a field should *not* be included in the output by prefixing its name with a '-'.
+
+Ranges of blocks to examine can be specified with the -r option as comma-delimited sets of range definitions:
+
+    <range>  : <digits>-<digits> | -<digits> | <digits>-
+    <digits> : integer offset or '0x' + hex offset
+
+If either the start or end of the range is left off of the range specification, the range will default to either the first or last block of the file (0-based offset).
+
+We do no range checking or ordering for overlaps other than not letting the ending block exceed the number of blocks in the file; i.e., if start > range, you're going to end up with nothing output for that range.  Similarly, we also do no checking to ensure no duplicates are specified in the range specifications.  We also reserve the right to improve this behavior, so don't count on being able to get duplicates.
+
+EOH
+}
+
+sub usage {
+    my $err = shift;
+    my $msg = shift;
+
+    print STDERR "usage: $0 [options] <relfile>\n";
+    print STDERR "$0: $msg\n" if $msg;
+
+    $err && exit $err;
+}
+
+sub debug {
+    warn (@_) if $debug;
+}
