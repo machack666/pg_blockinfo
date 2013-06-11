@@ -8,7 +8,7 @@ require 5.008;
 use Getopt::Long;
 use Data::Dumper;
 
-our $VERSION = q('0.1');
+our $VERSION = q('0.2');
 
 my $bs     = 8192;
 my $debug  = 0;
@@ -16,6 +16,8 @@ my $fields = [];
 my $help   = 0;
 my $ranges = [];
 my $hex    = 0;
+my $decval = 0;
+my $repeat = 0;
 my $count  = 0;
 
 GetOptions(
@@ -25,6 +27,8 @@ GetOptions(
     's|blocksize=i' => \$bs,
     'r|b|range=s'   => $ranges,
     'x|hex'         => \$hex,
+    'dec|decval'    => \$decval,
+    'repeat!'       => \$repeat,
     'c|blockcount'  => \$count,
 ) or usage(1);
 
@@ -32,11 +36,16 @@ help() and exit if $help;
 usage(1, "$0: one relfile required") unless @ARGV == 1;
 
 my ($unpack_template, $output_format) = parse_fields($fields);
+my $block_template = $hex ? '0x%08x:' : '% 9d:';
 my @ranges = parse_ranges($ranges);
 
 debug("got unpack_template: '$unpack_template'\n");
+debug("got block_template: '$block_template'\n");
 debug("got output_format: '$output_format'\n");
 debug("found ranges: ". Data::Dumper::Dumper(\@ranges));
+
+# always start with the leading block number.
+# relfile segment limited to 1G, so max block index is 134217727, so 9-char max
 
 RELFILE:
 for my $f (@ARGV) {
@@ -52,6 +61,9 @@ for my $f (@ARGV) {
 
     my $blocks = $sz / $bs;
     my $data;
+	my $oldline = 0;
+	my $oldoutput = '';
+	my $repeats = 0;
 
     foreach my $r (@ranges) {
         my ($s,$e) = @$r;
@@ -70,9 +82,34 @@ for my $f (@ARGV) {
         for my $i ($s..$e) {
             sysseek($fh, $i * $bs, 0);
             sysread($fh, $data, $bs) or warn "unexpected eof() on block $i\n" and next RELFILE;
-
-            printf $output_format, $i, unpack $unpack_template, $data;
+            if ($repeat) {
+				printf $block_template, $i;
+				printf $output_format, unpack $unpack_template, $data;
+			}
+			else {
+				my $output = sprintf $output_format, unpack $unpack_template, $data;
+				if ($output ne $oldoutput or $i == $e) {
+					if ($oldoutput and $repeats) {
+						printf "(repeats %d %s)\n", $repeats, $repeats<2 ? 'time' : 'times';
+					}
+					printf $block_template, $i;
+					print $output;
+					$oldline = $i;
+					$oldoutput = $output;
+					$repeats = 0;
+				}
+				else {
+					$repeats++;
+				}
+			}
         }
+
+		if ($repeats) {
+			die "Final repeats: $repeats\n";
+		}
+
+
+
     }
 
     debug("closing $f\n");
@@ -82,7 +119,7 @@ for my $f (@ARGV) {
 
 
 ######  Utility funcs, etc  ######
-use vars qw(@valid_fields %field_abbrev %field_size %size_fmt %size_skip);
+use vars qw(@valid_fields %field_abbrev %field_size %size_fmt %size_fmt_dec %size_skip);
 
 # TODO: stick these options in version-specific packages so we can
 # import/alias the symbols in main to specific catversions to allow
@@ -94,6 +131,7 @@ BEGIN {
     %field_abbrev = qw(s lsn_seg o lsn_off t tli f flags l lower u upper S special z pagesize_version v pagesize_version x prune_xid);
     %field_size   = qw(lsn_seg L lsn_off L tli S flags S lower S upper S special S pagesize_version S prune_xid L);
     %size_fmt   = ('L' => '0x%08x', 'S' => '0x%04x');
+    %size_fmt_dec  = ('L' => '%d', 'S' => '%d');
     %size_skip  = ('L' => 'x4', 'S' => 'x2');
 }
 
@@ -149,15 +187,13 @@ sub parse_fields {
         die "unknown fields: @unknown_fields; valid ones are: all @valid_fields\n";
     }
 
-    # always start with the leading block number.
-    # relfile segment limited to 1G, so max block index is 134217727, so 9-char max
-    my $printf =  $hex ? '0x%08x:' : '% 9d:';
+	my $printf = '';
     my $unpack = '';
 
     foreach my $f (@valid_fields) {
         if (my $sz = $want_field{$f}) {
             $unpack .= $sz;
-            $printf .= " $f=" . $size_fmt{$sz};
+            $printf .= " $f=" . ($decval ? $size_fmt_dec{$sz} : $size_fmt{$sz});
         }
         else {
             $unpack .= $size_skip{$field_size{$f}};
