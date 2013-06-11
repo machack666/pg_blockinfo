@@ -113,6 +113,16 @@ and can appear singly or in a range (unbounded or unbounded) when
 separated by a hyphen.
 
 
+See also:
+---------
+
+http://www.postgresql.org/docs/current/static/storage-file-layout.html
+http://www.postgresql.org/docs/current/static/storage-page-layout.html
+http://www.postgresql.org/docs/current/static/storage-fsm.html
+http://www.postgresql.org/docs/current/static/storage-vm.html
+https://github.com/postgres/postgres/blob/master/src/backend/storage/freespace/README
+
+
 Planned future features/TODO:
 -----------------------------
 
