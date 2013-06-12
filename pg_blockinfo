@@ -114,6 +114,7 @@ for my $f (@ARGV) {
 				my @info = unpack 'LLS6L', $data;
 				my $pagesize = $info[6];
 				$stat{pagesize}{$pagesize}++;
+				$stat{pagesizefirst}{$pagesize} ||= $i;
 
 				next;
 			}
@@ -143,9 +144,6 @@ for my $f (@ARGV) {
 		if ($repeats) {
 			die "Final repeats: $repeats\n";
 		}
-
-
-
     }
 
     debug("closing $f\n");
@@ -154,11 +152,13 @@ for my $f (@ARGV) {
 	if ($stats) {
 		print "Total pages: $stat{numpages}\n";
 		for my $size (sort {$stat{pagesize}{$b} <=> $stat{pagesize}{$a}} keys %{ $stat{pagesize} }) {
-			printf "  Pages of size %4d: %s (%d%%)\n",
+			printf "  Pages of size %4d: %s (%d%%)  [first at page %d]\n",
 				$size,
 				commatize($stat{pagesize}{$size}),
-				int (0.5 + ($stat{pagesize}{$size} / $stat{numpages}*100));
+				int (0.5 + ($stat{pagesize}{$size} / $stat{numpages}*100)),
+				$stat{pagesizefirst}{$size};
 		}
+
 	}
 
 }
