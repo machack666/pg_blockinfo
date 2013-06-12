@@ -19,6 +19,7 @@ my $hex    = 0;
 my $decval = 0;
 my $repeat = 0;
 my $count  = 0;
+my $stats  = 0;
 
 GetOptions(
     'd|debug'       => \$debug,
@@ -30,6 +31,7 @@ GetOptions(
     'dec|decval'    => \$decval,
     'repeat!'       => \$repeat,
     'c|blockcount'  => \$count,
+    'stats'         => \$stats,
 ) or usage(1);
 
 help() and exit if $help;
@@ -65,6 +67,9 @@ for my $f (@ARGV) {
 	my $oldoutput = '';
 	my $repeats = 0;
 
+	my %stat;
+	my $page_layout_version;
+
     foreach my $r (@ranges) {
         my ($s,$e) = @$r;
         $s = 0           unless defined $s;
@@ -82,6 +87,37 @@ for my $f (@ARGV) {
         for my $i ($s..$e) {
             sysseek($fh, $i * $bs, 0);
             sysread($fh, $data, $bs) or warn "unexpected eof() on block $i\n" and next RELFILE;
+
+			## Figure out the version if we don't know it
+			if (! defined $page_layout_version) {
+				my $sizever = (unpack 'LLS5S', $data)[7];
+				$page_layout_version = $sizever & 0x00FF;
+				if ($debug) {
+					debug("Page layout version is $page_layout_version\n");
+					my $ver =
+						0 == $page_layout_version ? '7.2 or lower'
+					  : 1 == $page_layout_version ? '7.3 or 7.4'
+					  : 2 == $page_layout_version ? '8.0'
+					  : 3 == $page_layout_version ? '8.1'
+					  : 4 == $page_layout_version ? '8.3 or higher'
+					  : 'unknown!';
+					debug("Postgres version is $ver\n");
+				}
+			}
+
+			if ($stats) {
+				## Gather up interesting stats about each page
+
+				## We count here rather than above to allow for filtering
+				$stat{numpages}++;
+
+				my @info = unpack 'LLS6L', $data;
+				my $pagesize = $info[6];
+				$stat{pagesize}{$pagesize}++;
+
+				next;
+			}
+
             if ($repeat) {
 				printf $block_template, $i;
 				printf $output_format, unpack $unpack_template, $data;
@@ -114,6 +150,17 @@ for my $f (@ARGV) {
 
     debug("closing $f\n");
     close $fh;
+
+	if ($stats) {
+		print "Total pages: $stat{numpages}\n";
+		for my $size (sort {$stat{pagesize}{$b} <=> $stat{pagesize}{$a}} keys %{ $stat{pagesize} }) {
+			printf "  Pages of size %4d: %s (%d%%)\n",
+				$size,
+				commatize($stat{pagesize}{$size}),
+				int (0.5 + ($stat{pagesize}{$size} / $stat{numpages}*100));
+		}
+	}
+
 }
 
 
@@ -301,4 +348,12 @@ sub usage {
 
 sub debug {
     warn (@_) if $debug;
+}
+
+sub commatize {
+	my $string = shift;
+	$string = reverse $string;
+	$string =~ s/(\d\d\d)(?=\d)(?!\d*\.)/$1,/g;
+	$string = reverse $string;
+	return $string;
 }
