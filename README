@@ -121,6 +121,7 @@ http://www.postgresql.org/docs/current/static/storage-page-layout.html
 http://www.postgresql.org/docs/current/static/storage-fsm.html
 http://www.postgresql.org/docs/current/static/storage-vm.html
 https://github.com/postgres/postgres/blob/master/src/backend/storage/freespace/README
+https://github.com/postgres/postgres/blob/master/src/include/storage/bufpage.h
 
 
 Planned future features/TODO:
