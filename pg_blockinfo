@@ -119,7 +119,7 @@ for my $f (@ARGV) {
 				next;
 			}
 
-            if ($repeat) {
+            if (!$repeat) {
 				printf $block_template, $i;
 				printf $output_format, unpack $unpack_template, $data;
 			}
